@@ -1,0 +1,48 @@
+{
+  "model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "extraction_layer": 10,
+  "n_texts": 40,
+  "max_length": 512,
+  "discard_margin": 0.9,
+  "force_sink": 4,
+  "class_mix": {
+    "high": 941,
+    "necessary": 10760,
+    "discard": 2461,
+    "total": 14162
+  },
+  "results": [
+    {
+      "method": "Baseline",
+      "kv_bytes": 406052864,
+      "memory_reduction_pct": 0.0,
+      "perplexity": 9.919297229671532,
+      "ppl_delta_pct": 0.0,
+      "total_tokens": 6053
+    },
+    {
+      "method": "Uniform-INT8",
+      "kv_bytes": 209371008,
+      "memory_reduction_pct": 48.4375,
+      "perplexity": 10.177422796155462,
+      "ppl_delta_pct": 2.6022565964834765,
+      "total_tokens": 6053
+    },
+    {
+      "method": "KVCIS3",
+      "kv_bytes": 186056192,
+      "memory_reduction_pct": 54.17931789295297,
+      "perplexity": 10.388064731918574,
+      "ppl_delta_pct": 4.725813647813881,
+      "total_tokens": 6053
+    },
+    {
+      "method": "KVCIS3-noDrop",
+      "kv_bytes": 222439616,
+      "memory_reduction_pct": 45.219050098856094,
+      "perplexity": 10.132126503253938,
+      "ppl_delta_pct": 2.1456083899348277,
+      "total_tokens": 6053
+    }
+  ]
+}

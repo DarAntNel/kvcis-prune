@@ -1,0 +1,12 @@
+{
+  "model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "extraction_layer": 10,
+  "n_prompts": 200,
+  "max_prompt_tokens": 96,
+  "generation_steps": 30,
+  "evict_window": 10,
+  "evict_max_ratio": 0.5,
+  "total_tokens": 10736,
+  "n_evictable": 4788,
+  "evictable_fraction": 0.44597615499254845
+}

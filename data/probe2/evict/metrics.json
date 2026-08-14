@@ -1,0 +1,18 @@
+{
+  "test_accuracy": 0.7886405959031657,
+  "test_balanced_accuracy": 0.786959877896879,
+  "evict_precision": 0.7587268993839835,
+  "evict_recall": 0.7713987473903967,
+  "evict_f1": 0.7650103519668737,
+  "confusion_matrix_rows_true_cols_pred": [
+    [
+      955,
+      235
+    ],
+    [
+      219,
+      739
+    ]
+  ],
+  "C": 1.0
+}

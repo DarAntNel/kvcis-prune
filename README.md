@@ -1,177 +1,126 @@
-# KVCIS: Activation-Based Token Importance Prediction for Intelligent KV-Cache Compression
+# KVCIS-3 — two probes: original KVCIS tiers + deferred eviction
 
-This repository contains the code, data, and experimental results for the paper:
+A standalone variant of the KVCIS method (see `../kvcis/`). The original KVCIS
+probe is kept **operating exactly as designed**, and a **second probe** is
+trained alongside it to decide — later, as the cache grows — which already-stored
+tokens can be evicted.
 
-> **KVCIS: Activation-Based Token Importance Prediction for Intelligent KV-Cache Compression**  
-> Glen Messenger  
+| Probe | What it is | When it acts | What it decides |
+|-------|-----------|--------------|-----------------|
+| **A — importance** | the *original* KVCIS Ridge regression, recreated unchanged | at insertion | importance ≥ threshold → **fp16**, else **int8**. Every token is stored; nothing is dropped up front. |
+| **B — evictability** | new binary logistic probe | **deferred** — only after a token has aged past a grace window | flags int8-tier tokens whose attention it predicts will go quiet later; those are then physically removed from the cache |
 
-## Abstract
+Hard rules, enforced at runtime regardless of what probe B says:
 
-We introduce KVCIS (KV-Cache Importance Scoring), a novel approach to KV-cache compression that predicts token importance from intermediate-layer activations before attention is computed. Unlike existing methods that make compression decisions based on attention scores computed during generation, KVCIS enables proactive compression at cache insertion time. A simple linear probe achieves R² = 0.998 overall and R² = 0.68–0.79 for discriminating among content tokens. Extensive validation demonstrates **50% memory reduction with zero degradation on NarrativeQA**, while uniform quantization degrades by 7.8% at the same compression ratio.
+1. **fp16-tier tokens are never evicted.** High-attention tokens always remain.
+2. The first `--force-sink` tokens are never evicted (attention sinks).
+3. The most recent `--grace-recent` tokens are never evicted — they are too
+   young for the "goes quiet later" judgement to apply. A token like *"over"*
+   in *"The cow jumped over…"* must survive long enough to serve a follow-up
+   question ("where did the cow jump?").
+4. Only evict when `P(evictable) ≥ --evict-margin` (raise it for safety;
+   precision is the safety metric — a false positive evicts a needed token).
 
-## Key Results
+The motivating example: after the model finishes "The cow jumped over the
+moon" and the user asks "where did the cow jump?", the second *"the"*
+(position 5) has served its brief syntactic duty and adds no semantic value —
+it is int8-tier, aged past grace, and quiet: evict it. *"over"* stays.
 
-| Method | Memory Reduction | NarrativeQA F1 | F1 Δ |
-|--------|------------------|----------------|------|
-| Baseline | 0% | 0.0642 | — |
-| **KVCIS** | **50%** | **0.0642** | **0.0%** |
-| Uniform-INT8 | 50% | 0.0592 | -7.8% |
-| H2O | 40% | 0.0642 | 0.0% |
+This folder is self-contained: it copies the cache/quantization plumbing it
+needs into `code/kv_utils.py` and shares nothing at runtime with `../kvcis/`
+(same venv, same model, separate `data/` and `results/`).
 
-## Repository Structure
+> **History:** this folder previously implemented a 3-class insertion-time
+> probe (fp16 / int8 / never-store); those results remain in
+> `results/kvcis3_results.json` and `results/margin_*/`. The two-probe design
+> replaces it: instead of refusing to store tokens up front, everything is
+> stored and eviction is a *deferred, revocable-by-design* decision.
 
-```
-kvcis/
-├── code/                    # Source code
-│   ├── step1_single_prompt.py    # Activation extraction test
-│   ├── step2_collect_data.py     # Training data collection
-│   ├── step3_train_probe.py      # Probe training
-│   ├── step4_compression_eval.py # Compression evaluation
-│   ├── longctx_eval.py           # Long-context experiments
-│   └── requirements.txt          # Dependencies
-├── results/                 # Experimental results
-│   ├── baseline_comparison.json  # Table 1 data
-│   ├── downstream_tasks.json     # Table 2 data
-│   └── longctx_scaling.json      # Table 3 data
-├── scripts/                 # Reproduction scripts
-│   ├── run_all.sh               # Full reproduction
-│   └── run_quick.sh             # Quick validation
-└── README.md
-```
+---
 
-## Dataset
+## How the labels are made (step 2)
 
-The training dataset consists of 500 diverse instruction-following prompts processed through Llama-3.1-8B-Instruct. For each prompt, ground-truth token importance labels are computed by aggregating attention weights across all generated tokens and attention heads (as defined in Equation 1 of the paper). Importance scores are normalized per-sequence before probe training.
+At each generation step *t*, the attention row over the current sequence sums
+to 1, so a token's *fair share* is `1/L_t`. We use the share **ratio**
+`r_t(j) = a_t(j) · L_t` (1.0 = exactly average attention), comparable across
+steps and context lengths. For each prompt token, two targets:
 
-- **Size:** 500 prompts for probe training; 19–100 held-out texts for perplexity evaluation; 50 samples each for NarrativeQA and Passkey Retrieval
-- **Format:** JSON (activations as numpy arrays, importance scores as floats)
-- **Generation:** Produced by running `step2_collect_data.py` against Llama-3.1-8B-Instruct
-- **License:** Apache 2.0
-- **DOI:** https://doi.org/10.5281/zenodo.19078457
+- **`importance`** (probe A): cumulative attention received, max-normalized
+  per sequence — byte-for-byte the original repo's step2 target.
+- **`evictable`** (probe B): 1 iff `max over steps t ≥ W of r_t < --evict-max-ratio`
+  (defaults: W = `--evict-window` = 10, ratio 0.5). Being consulted *early* is
+  fine and expected — local syntax duty; what matters is that the token goes
+  quiet **after** the window. This is strictly more permissive than the old
+  "never consulted at any step" discard rule, and is exactly the
+  position-5-"the" case.
 
-No external datasets are required. All training data is generated programmatically from the model.
+"Quiet after W" is only as trustworthy as the horizon it was measured over:
+prompts whose generation ends before W+3 steps are skipped, and
+`--generation-steps` (default 30, `-Full` 40) is the label horizon.
 
-## Quick Start
+Step 2 also saves `ratio_mean.npy` / `ratio_max.npy` / `ratio_max_late.npy`
+so labels can be re-thresholded offline without re-running the model.
 
-### Requirements
+## The probes (step 3)
 
-- Python 3.10+
-- PyTorch 2.0+
-- CUDA-capable GPU (24GB+ VRAM recommended)
-- Access to Llama-3.1-8B-Instruct via Hugging Face
+- **Probe A** — `Ridge` on layer-10 activations → importance scalar. Saved
+  exactly like the parent repo (`probe2/regression/weights.npy [H]`, `bias [1]`),
+  verified against manual `X @ w + b`.
+- **Probe B** — binary `LogisticRegression` (balanced) → evictability logit
+  (`probe2/evict/`). Trained on all tokens; the fp16 exemption is a hard
+  runtime rule, not learned.
 
-### Installation
+Both read the token's **own activation the moment it is computed**, so both
+decisions are *predicted* at insertion — but probe B's action is **deferred**:
+the token is stored normally and only removed after it has aged past the grace
+window. Prediction at insertion, action after grace.
 
-```bash
-git clone https://github.com/glenfmessenger/kvcis.git
-cd kvcis
-pip install -r code/requirements.txt
-```
+## Evaluation (step 4)
 
-### Reproduce Main Results
+Byte-accurate memory (fp16 = 2 B/elem; int8 = 1 B/elem + 8 B quant metadata per
+token/layer/tensor; evicted = 0 B once removed) and perplexity on held-out
+wikitext continuations, scored at the targets' **true absolute positions** so
+RoPE stays correct after tokens are removed (verified in the parent repo:
+keep-all == baseline exactly).
 
-```bash
-# Full reproduction (requires ~2 hours on A100)
-./scripts/run_all.sh
+Methods: `Baseline`, `Uniform-INT8`, `KVCIS` (probe A only — the original
+scheme, nothing evicted), `KVCIS+Evict` (probe A tiers + probe B deferred
+eviction).
 
-# Quick validation (requires ~15 minutes)
-./scripts/run_quick.sh
-```
+**Honest memory accounting:** deferred eviction stores everything first, so its
+*peak* bytes equal the plain-KVCIS row; the table reports *steady-state* bytes
+(after eviction has caught up). Both figures are in the JSON. If you need the
+peak never to occur, that is the old insertion-discard design — the trade is
+recorded in this repo's history.
 
-### Step-by-Step Execution
+---
 
-```bash
-cd code
+## Run
 
-# Step 1: Verify activation extraction
-python step1_single_prompt.py --model meta-llama/Llama-3.1-8B-Instruct
-
-# Step 2: Collect training data (500 prompts)
-python step2_collect_data.py \
-    --model meta-llama/Llama-3.1-8B-Instruct \
-    --n-prompts 500 \
-    --output-dir ../data
-
-# Step 3: Train importance probe
-python step3_train_probe.py \
-    --data-dir ../data \
-    --output-dir ../data/probe
-
-# Step 4: Evaluate compression
-python step4_compression_eval.py \
-    --model meta-llama/Llama-3.1-8B-Instruct \
-    --probe-path ../data/probe/regression \
-    --n-texts 50
-
-# Step 5: Long-context evaluation
-python longctx_eval.py \
-    --model meta-llama/Llama-3.1-8B-Instruct \
-    --probe-path ../data/probe/regression \
-    --context-lengths 512 1024 2048 \
-    --n-texts 20
+```powershell
+cd kvcis3\scripts
+.\run_3080.ps1          # quick pass: step1 -> step2 (200 prompts) -> step3 -> step4
+.\run_3080.ps1 -Full    # 500 prompts, longer label horizon
 ```
 
-## Method Overview
+Or step by step (from `kvcis3\code`, with `$env:PYTHONUTF8=1`):
 
-KVCIS operates in two phases:
-
-### Training (Offline)
-1. Process diverse prompts through the model
-2. Extract activations at layer 12 (~37% depth)
-3. Generate tokens while recording attention patterns
-4. Train linear probe: `importance = activation · weights + bias`
-
-### Inference (Online)
-1. During prefill, extract activations at layer 12
-2. Predict importance via single dot product (~0.1ms)
-3. Store high-importance tokens at fp16, others at int8
-4. Proceed with generation using compressed cache
-
-```
-Importance > 0.9  →  fp16 (full precision)
-Importance ≤ 0.9  →  int8 (quantized)
+```powershell
+python step1_single_prompt.py    --model Qwen/Qwen2.5-1.5B-Instruct --extraction-layer 10   # sanity check on one prompt
+python step2_collect_data.py     --model Qwen/Qwen2.5-1.5B-Instruct --extraction-layer 10 --n-prompts 200 --generation-steps 30 --evict-window 10 --output-dir ../data
+python step3_train_probe.py      --data-dir ../data --output-dir ../data/probe2
+python step4_compression_eval.py --model Qwen/Qwen2.5-1.5B-Instruct --extraction-layer 10 --probe-path ../data/probe2 --n-texts 20
 ```
 
-## Results Reproduction
+Step 1 mirrors the parent repo's `step1_single_prompt.py`: it verifies
+activation extraction, records one prompt's per-step share-ratio trajectory,
+prints each token's trajectory-derived evictability next to probe A's tier and
+probe B's P(evictable), applies the hard rules, and shows the storage summary
+(all-fp16 → peak → steady). Its default prompt is the cow example above.
 
-### Table 1: Baseline Comparison (256 tokens)
+Knobs worth sweeping on step 4:
 
-| Method | Mem. ↓ | PPL | PPL Δ |
-|--------|--------|-----|-------|
-| Baseline | 0% | 27.62 | — |
-| Uniform-INT8 | 50% | 28.84 | +4.40% |
-| H2O-20 | 41% | 27.63 | +0.04% |
-| **KVCIS** | **45%** | **27.78** | **+0.57%** |
-
-### Table 2: Downstream Tasks
-
-| Method | Mem. ↓ | NarrativeQA F1 | Passkey Acc. |
-|--------|--------|----------------|--------------|
-| Baseline | 0% | 0.0642 | 100% |
-| Uniform-INT8 | 50% | 0.0592 | 100% |
-| **KVCIS** | **50%** | **0.0642** | **100%** |
-
-### Table 3: Long-Context Scaling
-
-| Context | KVCIS PPL Δ | Uniform-INT8 PPL Δ | Advantage |
-|---------|-------------|--------------------| ----------|
-| 256 | +0.57% | +4.40% | 7.7× |
-| 1024 | -0.07% | +0.47% | 6.7× |
-| 2048 | +0.14% | +0.73% | 5.2× |
-
-## Citation
-
-```bibtex
-@article{messenger2026kvcis,
-  title={KVCIS: Activation-Based Token Importance Prediction for Intelligent KV-Cache Compression},
-  author={Messenger, Glen},
-  year={2026}
-}
-```
-## License
-
-Apache 2.0
-
-## Contributing
-
-This repository is provided for research reproducibility. Issues and questions welcome via GitHub Issues.
+- `--evict-margin` (default 0.5) — the quality/memory dial. Raise toward 0.7–0.9
+  to evict only what probe B is confident about.
+- `--grace-recent` (default 16) — how long a token must age before eviction.
+- `--high-threshold` (default 0.9) — probe A's fp16 bar (original KVCIS default).

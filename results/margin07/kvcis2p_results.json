@@ -1,0 +1,51 @@
+{
+  "model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "extraction_layer": 10,
+  "n_texts": 20,
+  "max_length": 512,
+  "high_threshold": 0.9,
+  "evict_margin": 0.7,
+  "force_sink": 4,
+  "grace_recent": 16,
+  "token_fates": {
+    "fp16": 20,
+    "int8_kept": 4949,
+    "evicted": 2111,
+    "total": 7080
+  },
+  "kvcis_evict_peak_bytes": 104948480,
+  "results": [
+    {
+      "method": "Baseline",
+      "kv_bytes": 202997760,
+      "memory_reduction_pct": 0.0,
+      "perplexity": 11.298308308179827,
+      "ppl_delta_pct": 0.0,
+      "total_tokens": 3026
+    },
+    {
+      "method": "Uniform-INT8",
+      "kv_bytes": 104670720,
+      "memory_reduction_pct": 48.4375,
+      "perplexity": 11.60866134435678,
+      "ppl_delta_pct": 2.7468982763752425,
+      "total_tokens": 3026
+    },
+    {
+      "method": "KVCIS",
+      "kv_bytes": 104948480,
+      "memory_reduction_pct": 48.3006709039548,
+      "perplexity": 11.624016714267972,
+      "ppl_delta_pct": 2.882806852175701,
+      "total_tokens": 3026
+    },
+    {
+      "method": "KVCIS+Evict",
+      "kv_bytes": 73739456,
+      "memory_reduction_pct": 63.67474399717514,
+      "perplexity": 11.817681326863294,
+      "ppl_delta_pct": 4.596909594929777,
+      "total_tokens": 3026
+    }
+  ]
+}
